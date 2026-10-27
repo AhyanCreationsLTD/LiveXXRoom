@@ -1,14 +1,25 @@
-name: 24/7 Telegram Video Live
+name: Telegram Video Live Stream
 
 on:
-  workflow_dispatch: # ম্যানুয়ালি রান করার জন্য
-  schedule:
-    - cron: '0 */5 * * *' # প্রতি ৫ ঘণ্টা পর পর রিফ্রেশ বা রান করার নিয়ম (প্রয়োজনমতো পরিবর্তন করতে পারেন)
+  workflow_dispatch:
+    inputs:
+      rtmp_url:
+        description: 'Enter Full RTMP URL (e.g., rtmp://a.rtmp.telegram.org/s/...)'
+        required: true
+        type: string
+      stream_key:
+        description: 'Enter Telegram Stream Key'
+        required: true
+        type: string
+      video_url:
+        description: 'Enter Direct Video Download Link (MP4)'
+        required: true
+        type: string
 
 jobs:
   stream:
     runs-on: ubuntu-latest
-    timeout-minutes: 350 # GitHub-এর একটি জব সর্বোচ্চ ৩৬০ মিনিট বা ৬ ঘণ্টা পর্যন্ত চলতে পারে
+    timeout-minutes: 350 # GitHub-এর একটি জব সর্বোচ্চ প্রায় ৬ ঘণ্টা পর্যন্ত চলতে পারে
 
     steps:
       - name: Checkout Repository
@@ -17,18 +28,24 @@ jobs:
       - name: Install FFmpeg
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg
+          sudo apt-get install -y ffmpeg wget
+
+      - name: Download Video File
+        run: |
+          echo "Downloading video from provided URL..."
+          wget -O input_video.mp4 "${{ inputs.video_url }}"
 
       - name: Start Live Stream with FFmpeg
-        env:
-          RTMP_SERVER: ${{ secrets.RTMP_URL }}
         run: |
-          echo "Starting FFmpeg stream..."
+          echo "Starting FFmpeg live stream to Telegram..."
           
-          # -stream_loop -1 দিয়ে ভিডিওটি লুপ করা হয়েছে যাতে শেষ না হয়
-          ffmpeg -re -stream_loop -1 -i "video.mp4" \
+          # কমপ্লিট RTMP URL এবং Stream Key একসাথে যুক্ত করা হচ্ছে
+          FULL_RTMP="${{ inputs.rtmp_url }}/${{ inputs.stream_key }}"
+          
+          # FFmpeg এর মাধ্যমে লুপ স্ট্রিমিং শুরু
+          ffmpeg -re -stream_loop -1 -i "input_video.mp4" \
           -c:v libx264 -preset veryfast -b:v 2000k -maxrate 2000k -bufsize 4000k \
           -pix_fmt yuv420p -g 60 \
           -c:a aac -b:a 128k -ar 44100 \
-          -f flv "$RTMP_SERVER"
+          -f flv "$FULL_RTMP"
           
