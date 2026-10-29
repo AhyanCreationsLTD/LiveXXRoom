@@ -1,0 +1,152 @@
+name: Telegram Video Live Stream
+
+on:
+  workflow_dispatch:
+    inputs:
+      rtmp_url:
+        description: 'RTMP Server URL (without stream key)'
+        required: true
+        type: string
+      stream_key:
+        description: 'Telegram Stream Key'
+        required: true
+        type: string
+      video_url:
+        description: 'Direct MP4 Download URL'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: telegram-video-live
+  cancel-in-progress: false
+
+jobs:
+  stream:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install FFmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg curl
+
+          ffmpeg -version | head -n 1
+          ffprobe -version | head -n 1
+
+      - name: Download and Validate Video
+        env:
+          VIDEO_URL: ${{ inputs.video_url }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$RUNNER_TEMP/telegram-live"
+          cd "$RUNNER_TEMP/telegram-live"
+
+          echo "Downloading video..."
+
+          curl -fL \
+            --retry 5 \
+            --retry-delay 3 \
+            --retry-all-errors \
+            --connect-timeout 30 \
+            --max-time 1800 \
+            "$VIDEO_URL" \
+            -o input_video.mp4
+
+          test -s input_video.mp4
+
+          echo "Checking video and audio streams..."
+
+          ffprobe -v error \
+            -show_entries stream=codec_type \
+            -of csv=p=0 input_video.mp4 > streams.txt
+
+          grep -q '^video$' streams.txt
+
+          echo "Video validation successful."
+
+      - name: Start Resilient Telegram Live Stream
+        env:
+          RTMP_URL: ${{ inputs.rtmp_url }}
+          STREAM_KEY: ${{ inputs.stream_key }}
+        run: |
+          set -uo pipefail
+
+          cd "$RUNNER_TEMP/telegram-live"
+
+          # Hide the stream key from normal GitHub Actions logs.
+          echo "::add-mask::$STREAM_KEY"
+
+          # Remove trailing slash from the server URL.
+          RTMP_BASE="${RTMP_URL%/}"
+
+          # The RTMP URL must NOT already contain the stream key.
+          FULL_RTMP="${RTMP_BASE}/${STREAM_KEY}"
+
+          # Basic input validation.
+          if [[ "$RTMP_BASE" != rtmp://* &&
+                "$RTMP_BASE" != rtmps://* ]]; then
+            echo "Error: RTMP server URL must begin with rtmp:// or rtmps://"
+            exit 1
+          fi
+
+          if [[ -z "$STREAM_KEY" ]]; then
+            echo "Error: Stream key is empty."
+            exit 1
+          fi
+
+          echo "Starting Telegram live stream..."
+
+          ATTEMPT=0
+
+          while true; do
+            ATTEMPT=$((ATTEMPT + 1))
+            echo "FFmpeg session attempt: $ATTEMPT"
+
+            ffmpeg \
+              -hide_banner \
+              -nostdin \
+              -loglevel warning \
+              -stats_period 10 \
+              -re \
+              -stream_loop -1 \
+              -i input_video.mp4 \
+              -map 0:v:0 \
+              -map '0:a:0?' \
+              -vf "fps=30" \
+              -c:v libx264 \
+              -preset veryfast \
+              -tune zerolatency \
+              -pix_fmt yuv420p \
+              -profile:v main \
+              -b:v 2000k \
+              -maxrate 2000k \
+              -bufsize 4000k \
+              -g 60 \
+              -keyint_min 60 \
+              -sc_threshold 0 \
+              -c:a aac \
+              -b:a 128k \
+              -ar 44100 \
+              -ac 2 \
+              -max_muxing_queue_size 1024 \
+              -rw_timeout 15000000 \
+              -flvflags no_duration_filesize \
+              -f flv \
+              "$FULL_RTMP"
+
+            FFMPEG_STATUS=$?
+
+            echo "FFmpeg exited with status: $FFMPEG_STATUS"
+            echo "Retrying stream connection in 5 seconds..."
+
+            sleep 5
+          done
+          
